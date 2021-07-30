@@ -12,6 +12,40 @@
 
 #include "psp-ringbuf.h"
 
+static void enqueue_data(struct sev_queue *ring_buf,
+			 const void *src, unsigned int len, unsigned int off)
+{
+	unsigned int size = ring_buf->mask + 1;
+	unsigned int esize = ring_buf->esize;
+	unsigned int l;
+	void *data;
+
+	if (esize != 1) {
+		off *= esize;
+		size *= esize;
+		len *= esize;
+	}
+	l = min(len, size - off);
+
+	data = (void *)ring_buf->data_align;
+	memcpy(data + off, src, l);
+	memcpy(data, src + l, len - l);
+	/*
+	 * make sure that the data in the ring buffer is up to date before
+	 * incrementing the ring_buf->tail index counter
+	 */
+	smp_wmb();
+}
+
+static unsigned int queue_avail_size(struct sev_queue *ring_buf)
+{
+	/* According to the nature of unsigned Numbers,
+	 * it always work well even though tail < head
+	 * Reserved 1 element to distinguish full and empty
+	 */
+	return ring_buf->mask - (ring_buf->tail-ring_buf->head);
+}
+
 int sev_queue_init(struct sev_queue *ring_buf,
 		   void *buffer, unsigned int size, size_t esize)
 {
@@ -25,4 +59,18 @@ int sev_queue_init(struct sev_queue *ring_buf,
 	ring_buf->data_align = ALIGN(ring_buf->data, SEV_RING_BUFFER_ALIGN);
 
 	return 0;
+}
+
+unsigned int enqueue_cmd(struct sev_queue *ring_buf,
+			 const void *buf, unsigned int len)
+{
+	unsigned int size;
+
+	size = queue_avail_size(ring_buf);
+	if (len > size)
+		len = size;
+
+	enqueue_data(ring_buf, buf, len, ring_buf->tail);
+	ring_buf->tail += len;
+	return len;
 }

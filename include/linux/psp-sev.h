@@ -159,6 +159,13 @@ struct sev_data_init_ex {
 #define SEV_COMMAND_PRIORITY_LOW	1
 #define SEV_COMMAND_PRIORITY_NUM	2
 
+struct sev_cmdptr_entry {
+	u16 cmd_id;
+	u16 cmd_flags;
+	u32 sw_data;
+	u64 cmd_buf_ptr;
+} __packed;
+
 struct sev_queue {
 	u32	head;
 	u32	tail;
@@ -976,7 +983,7 @@ void *snp_alloc_firmware_page(gfp_t mask);
 void snp_free_firmware_page(void *addr);
 
 int sev_ring_buffer_queue_init(void);
-
+int fill_cmd_queue(int prio, int cmd, void *data, uint16_t flags);
 int sev_ring_buffer_queue_free(void);
 
 #else	/* !CONFIG_CRYPTO_DEV_SP_PSP */
@@ -1015,6 +1022,8 @@ static inline void snp_free_firmware_page(void *addr) { }
 static inline int sev_ring_buffer_queue_init(void) { return -ENODEV; }
 
 static inline int sev_ring_buffer_queue_free(void) { return -ENODEV; }
+
+static inline int fill_cmd_queue(int prio, int cmd, void *data, uint16_t flags) { return -ENODEV; }
 #endif	/* CONFIG_CRYPTO_DEV_SP_PSP */
 
 #endif	/* __PSP_SEV_H__ */
