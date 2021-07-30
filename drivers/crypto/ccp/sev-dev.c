@@ -1386,6 +1386,29 @@ int fill_cmd_queue(int prio, int cmd, void *data, uint16_t flags)
 }
 EXPORT_SYMBOL_GPL(fill_cmd_queue);
 
+int check_stat_queue_status(int *psp_ret)
+{
+	unsigned int len;
+	int prio;
+	struct sev_device *sev = psp_master->sev_data;
+
+	for (prio = SEV_COMMAND_PRIORITY_HIGH; prio < SEV_COMMAND_PRIORITY_NUM; prio++) {
+		do {
+			struct sev_statval_entry statval;
+			len = dequeue_stat(&sev->ring_buffer[prio].stat_val, &statval, 1);
+			if (len) {
+				if (statval.status != 0) {
+					*psp_ret = statval.status;
+					return -EFAULT;
+				}
+			}
+		} while (len);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(check_stat_queue_status);
+
 int sev_ring_buffer_queue_init(void)
 {
 	int i;

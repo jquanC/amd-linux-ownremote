@@ -29,6 +29,8 @@ int sev_queue_init(struct sev_queue *ring_buf,
 		   void *buffer, unsigned int size, size_t esize);
 unsigned int enqueue_cmd(struct sev_queue *ring_buf,
 			 const void *buf, unsigned int len);
+unsigned int dequeue_stat(struct sev_queue *ring_buf,
+			  void *buf, unsigned int len);
 
 #endif /* __PSP_RINGBUF_H__ */
 
