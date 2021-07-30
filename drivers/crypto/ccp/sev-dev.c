@@ -136,7 +136,7 @@ static void sev_irq_handler(int irq, void *data, unsigned int status)
 
 	/* Check if it is SEV command completion: */
 	reg = ioread32(sev->io_regs + sev->vdata->cmdresp_reg);
-	if (FIELD_GET(PSP_CMDRESP_RESP, reg)) {
+	if ((sev_comm_mode == SEV_COMM_RINGBUFFER_ON) || (FIELD_GET(PSP_CMDRESP_RESP, reg))) {
 		sev->int_rcvd = 1;
 		wake_up(&sev->int_queue);
 	}
@@ -172,6 +172,20 @@ static int sev_wait_cmd_ioc(struct sev_device *sev,
 		return -ETIMEDOUT;
 
 	*reg = ioread32(sev->io_regs + sev->vdata->cmdresp_reg);
+
+	return 0;
+}
+
+static int sev_wait_cmd_ioc_ring_buffer(struct sev_device *sev,
+					unsigned int *reg, unsigned int timeout)
+{
+	int ret;
+
+	ret = wait_event_timeout(sev->int_queue, sev->int_rcvd, timeout * HZ);
+	if (!ret)
+		return -ETIMEDOUT;
+
+	*reg = ioread32(sev->io_regs + sev->vdata->cmdbuff_addr_lo_reg);
 
 	return 0;
 }
@@ -989,6 +1003,73 @@ static int __sev_do_cmd_locked(int cmd, void *data, int *psp_ret)
 	return ret;
 }
 
+static int get_cmd_status(int prio, int index)
+{
+	struct sev_device *sev = psp_master->sev_data;
+	struct sev_queue *ringbuf = &sev->ring_buffer[prio].stat_val;
+	struct sev_statval_entry *statval = (struct sev_statval_entry *)ringbuf->data;
+
+	return statval[index].status;
+}
+
+static int __sev_do_ringbuf_cmds_locked(int *psp_ret)
+{
+	struct psp_device *psp = psp_master;
+	unsigned int reg, ret = 0;
+	unsigned int rb_tail;
+	unsigned int rb_ctl;
+	int last_cmd_index;
+	struct sev_device *sev;
+
+	if (!psp || !psp->sev_data)
+		return -ENODEV;
+
+	if (psp_dead)
+		return -EBUSY;
+
+	sev = psp->sev_data;
+
+	/* update rb tail */
+	rb_tail = ioread32(sev->io_regs + sev->vdata->cmdbuff_addr_hi_reg);
+	rb_tail &= (~PSP_RBTAIL_QHI_TAIL_MASK);
+	rb_tail |= (sev->ring_buffer[SEV_COMMAND_PRIORITY_HIGH].cmd_ptr.tail
+						<< PSP_RBTAIL_QHI_TAIL_SHIFT);
+	rb_tail &= (~PSP_RBTAIL_QLO_TAIL_MASK);
+	rb_tail |= sev->ring_buffer[SEV_COMMAND_PRIORITY_LOW].cmd_ptr.tail;
+	iowrite32(rb_tail, sev->io_regs + sev->vdata->cmdbuff_addr_hi_reg);
+
+	/* update rb ctl to trigger psp irq */
+	sev->int_rcvd = 0;
+	/* PSP response to x86 only when all queue is empty or error happends */
+	rb_ctl = (PSP_RBCTL_X86_WRITES | PSP_RBCTL_RBMODE_ACT | PSP_RBCTL_CLR_INTSTAT);
+	iowrite32(rb_ctl, sev->io_regs + sev->vdata->cmdresp_reg);
+
+	/* wait for all commands in ring buffer completed */
+	ret = sev_wait_cmd_ioc_ring_buffer(sev, &reg, psp_timeout*10);
+	if (ret) {
+		if (psp_ret)
+			*psp_ret = 0;
+		dev_err(sev->dev, "sev command in ringbuffer mode timed out, disabling PSP \n");
+		psp_dead = true;
+		return ret;
+	}
+	/* cmd error happends */
+	if (reg & PSP_RBHEAD_QPAUSE_INT_STAT)
+		ret = -EFAULT;
+
+	if (psp_ret){
+		last_cmd_index = (reg & PSP_RBHEAD_QHI_HEAD_MASK)
+					>> PSP_RBHEAD_QHI_HEAD_SHIFT;
+		*psp_ret = get_cmd_status(SEV_COMMAND_PRIORITY_HIGH, last_cmd_index);
+		if (*psp_ret == 0) {
+			last_cmd_index = reg & PSP_RBHEAD_QLO_HEAD_MASK;
+			*psp_ret = get_cmd_status(SEV_COMMAND_PRIORITY_LOW, last_cmd_index);
+		}
+	}
+
+	return ret;
+}
+
 int sev_do_cmd(int cmd, void *data, int *psp_ret)
 {
 	int rc;
@@ -1085,6 +1166,34 @@ static int __sev_ring_buffer_enter_locked(int *error)
 
 	kfree(data);
 	return ret;
+}
+
+static int sev_do_ringbuf_cmds(int *psp_ret)
+{
+	struct psp_device *psp = psp_master;
+	struct sev_device *sev;
+	int rc;
+
+	if (!psp || !psp->sev_data)
+	return -ENODEV;
+
+	sev = psp->sev_data;
+
+	mutex_lock(&sev_cmd_mutex);
+	rc = __sev_ring_buffer_enter_locked(psp_ret);
+	if (rc)
+		goto cmd_unlock;
+
+	rc = __sev_do_ringbuf_cmds_locked(psp_ret);
+
+	/* exit ringbuf mode by send CMD in mailbox mode */
+	__sev_do_cmd_locked(SEV_CMD_PLATFORM_STATUS, &sev->status_cmd_buf, NULL);
+	sev_comm_mode = SEV_COMM_MAILBOX_ON;
+
+cmd_unlock:
+	mutex_unlock(&sev_cmd_mutex);
+
+	return rc;
 }
 
 static void snp_set_hsave_pa(void *arg)
@@ -2571,6 +2680,15 @@ int sev_issue_cmd_external_user(struct file *filep, unsigned int cmd,
 	return sev_do_cmd(cmd, data, error);
 }
 EXPORT_SYMBOL_GPL(sev_issue_cmd_external_user);
+
+int sev_issue_ringbuf_cmds_external_user(struct file *filep, int *psp_ret)
+{
+	if (!filep || filep->f_op != &sev_fops)
+		return -EBADF;
+
+	return sev_do_ringbuf_cmds(psp_ret);
+}
+EXPORT_SYMBOL_GPL(sev_issue_ringbuf_cmds_external_user);
 
 void sev_pci_init(void)
 {

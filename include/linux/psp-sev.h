@@ -946,6 +946,12 @@ int sev_issue_cmd_external_user(struct file *filep, unsigned int id,
 				void *data, int *error);
 
 /**
+ * sev_issue_ringbuf_cmds_external_user - issue SEV commands into a ring
+ * buffer.
+ */
+int sev_issue_ringbuf_cmds_external_user(struct file *filep, int *psp_ret);
+
+/**
  * sev_guest_deactivate - perform SEV DEACTIVATE command
  *
  * @deactivate: sev_data_deactivate structure to be processed
@@ -1054,6 +1060,9 @@ static inline int sev_guest_df_flush(int *error) { return -ENODEV; }
 
 static inline int
 sev_issue_cmd_external_user(struct file *filep, unsigned int id, void *data, int *error) { return -ENODEV; }
+
+static inline int
+sev_issue_ringbuf_cmds_external_user(struct file *filep, int *psp_ret) { return -ENODEV; }
 
 static inline void *psp_copy_user_blob(u64 __user uaddr, u32 len) { return ERR_PTR(-EINVAL); }
 
