@@ -111,6 +111,16 @@ enum sev_cmd {
 	SEV_CMD_MAX,
 };
 
+/*  Ring Buffer Mode regions:
+ *   There are 4 regions and every region is a 4K area that must be 4K aligned.
+ *   To accomplish this allocate an amount that is the size of area and the required alignment.
+ *   The aligned address will be calculated from the returned address.
+ */
+#define SEV_RING_BUFFER_SIZE		(32 * 1024)
+#define SEV_RING_BUFFER_ALIGN		(4 * 1024)
+#define SEV_RING_BUFFER_LEN		(SEV_RING_BUFFER_SIZE + SEV_RING_BUFFER_ALIGN)
+#define SEV_RING_BUFFER_ESIZE		16
+
 /**
  * struct sev_data_init - INIT command parameters
  *
@@ -144,6 +154,25 @@ struct sev_data_init_ex {
 	u64 nv_address;                 /* In/Out */
 	u32 nv_len;                     /* In */
 } __packed;
+
+#define SEV_COMMAND_PRIORITY_HIGH 	0
+#define SEV_COMMAND_PRIORITY_LOW	1
+#define SEV_COMMAND_PRIORITY_NUM	2
+
+struct sev_queue {
+	u32	head;
+	u32	tail;
+	u32	mask; // mask = (size - 1),inicates the elements max count
+	u32	esize; //size of an element
+	u64	data;
+	u64	data_align;
+} __packed;
+
+struct sev_ringbuffer_queue {
+	struct sev_queue cmd_ptr;
+	struct sev_queue stat_val;
+} __packed;
+
 
 #define SEV_INIT_FLAGS_SEV_ES	0x01
 
@@ -946,6 +975,10 @@ void *psp_copy_user_blob(u64 uaddr, u32 len);
 void *snp_alloc_firmware_page(gfp_t mask);
 void snp_free_firmware_page(void *addr);
 
+int sev_ring_buffer_queue_init(void);
+
+int sev_ring_buffer_queue_free(void);
+
 #else	/* !CONFIG_CRYPTO_DEV_SP_PSP */
 
 static inline int
@@ -979,6 +1012,9 @@ static inline void *snp_alloc_firmware_page(gfp_t mask)
 
 static inline void snp_free_firmware_page(void *addr) { }
 
+static inline int sev_ring_buffer_queue_init(void) { return -ENODEV; }
+
+static inline int sev_ring_buffer_queue_free(void) { return -ENODEV; }
 #endif	/* CONFIG_CRYPTO_DEV_SP_PSP */
 
 #endif	/* __PSP_SEV_H__ */

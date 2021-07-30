@@ -46,6 +46,9 @@ struct sev_device {
 	unsigned int int_rcvd;
 	wait_queue_head_t int_queue;
 	struct sev_misc_dev *misc;
+	struct sev_user_data_status status_cmd_buf;
+	struct sev_data_init init_cmd_buf;
+	struct sev_ringbuffer_queue ring_buffer[2];
 
 	u8 api_major;
 	u8 api_minor;

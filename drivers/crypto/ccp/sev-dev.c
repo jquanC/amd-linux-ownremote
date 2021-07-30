@@ -36,6 +36,7 @@
 
 #include "psp-dev.h"
 #include "sev-dev.h"
+#include "psp-ringbuf.h"
 
 #define DEVICE_NAME		"sev"
 #define SEV_FW_FILE		"amd/sev.fw"
@@ -1340,6 +1341,78 @@ int sev_platform_init(struct sev_platform_init_args *args)
 	return rc;
 }
 EXPORT_SYMBOL_GPL(sev_platform_init);
+
+static int __sev_ring_buffer_queue_init(struct sev_ringbuffer_queue *ring_buffer)
+{
+	int ret = 0;
+	void *cmd_ptr_buffer	= NULL;
+	void *stat_val_buffer	= NULL;
+
+	memset((void *)ring_buffer, 0, sizeof(struct sev_ringbuffer_queue));
+
+	cmd_ptr_buffer = kzalloc(SEV_RING_BUFFER_LEN, GFP_KERNEL);
+	if (!cmd_ptr_buffer)
+		return -ENOMEM;
+	sev_queue_init(&ring_buffer->cmd_ptr, cmd_ptr_buffer,
+		       SEV_RING_BUFFER_LEN, SEV_RING_BUFFER_ESIZE);
+	stat_val_buffer = kzalloc(SEV_RING_BUFFER_LEN, GFP_KERNEL);
+	if (!stat_val_buffer) {
+		ret = -ENOMEM;
+		goto free_cmdptr;
+	}
+	sev_queue_init(&ring_buffer->stat_val, stat_val_buffer,
+		       SEV_RING_BUFFER_LEN, SEV_RING_BUFFER_ESIZE);
+	return 0;
+
+free_cmdptr:
+	kfree(cmd_ptr_buffer);
+
+	return ret;
+}
+
+int sev_ring_buffer_queue_init(void)
+{
+	int i;
+	int ret;
+	struct psp_device *psp = psp_master;
+	struct sev_device *sev = psp->sev_data;
+
+	if (!psp)
+		return -ENODEV;
+
+	for (i = SEV_COMMAND_PRIORITY_HIGH; i < SEV_COMMAND_PRIORITY_NUM; i++)
+	{
+		ret = __sev_ring_buffer_queue_init(&sev->ring_buffer[i]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sev_ring_buffer_queue_init);
+
+int sev_ring_buffer_queue_free(void)
+{
+	int i;
+	struct sev_ringbuffer_queue *ring_buffer;
+	struct psp_device *psp = psp_master;
+	struct sev_device *sev = psp->sev_data;
+
+	for (i = 0; i < SEV_COMMAND_PRIORITY_NUM; i++) {
+		ring_buffer = &sev->ring_buffer[i];
+		if(ring_buffer->cmd_ptr.data) {
+			kfree((void *)ring_buffer->cmd_ptr.data);
+			ring_buffer->cmd_ptr.data = 0;
+		}
+
+		if(ring_buffer->stat_val.data) {
+			kfree((void *)ring_buffer->stat_val.data);
+			ring_buffer->stat_val.data = 0;
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sev_ring_buffer_queue_free);
 
 static int __sev_platform_shutdown_locked(int *error)
 {
