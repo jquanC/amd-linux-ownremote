@@ -28,6 +28,16 @@ enum sev_state {
 };
 
 /**
+ * SEV communication state
+ */
+enum sev_comm_state {
+	SEV_COMM_MAILBOX_ON		= 0x0,
+	SEV_COMM_RINGBUFFER_ON		= 0x1,
+
+	SEV_COMM_MAX
+};
+
+/**
  * SEV platform and guest management commands
  */
 enum sev_cmd {
@@ -44,6 +54,7 @@ enum sev_cmd {
 	SEV_CMD_DF_FLUSH		= 0x00A,
 	SEV_CMD_DOWNLOAD_FIRMWARE	= 0x00B,
 	SEV_CMD_GET_ID			= 0x00C,
+	SEV_CMD_RING_BUFFER		= 0x00F,
 	SEV_CMD_INIT_EX                 = 0x00D,
 
 	/* Guest commands */
@@ -187,6 +198,30 @@ struct sev_ringbuffer_queue {
 	struct sev_queue stat_val;
 } __packed;
 
+/**
+ * struct sev_data_ring_buffer - RING_BUFFER command parameters
+ *
+ * @queue_lo_cmdptr_address: pysical address of the region to be used for low priority queue's CmdPtr ring buffer
+ * @queue_lo_statval_address: pysical address of the region to be used for low priority queue's StatVal ring buffer
+ * @queue_hi_cmdptr_address: pysical address of the region to be used for high priority queue's CmdPtr ring buffer
+ * @queue_hi_statval_address: pysical address of the region to be used for high priority queue's StatVal ring buffer
+ * @queue_lo_size: size of the low priority queue in 4K pages.Must be 1
+ * @queue_hi_size: size of the high priority queue in 4K pages.Must be 1
+ * @queue_lo_threshold: queue(low) size,below which an interrupt may be generated.
+ * @queue_hi_threshold: queue(high) size,below which an interrupt may be generated.
+ * @int_on_empty: unconditionally interrupt when both queues are found empty
+ */
+struct sev_data_ring_buffer {
+	u64 queue_lo_cmdptr_address;		/* In */
+	u64 queue_lo_statval_address;		/* In */
+	u64 queue_hi_cmdptr_address;		/* In */
+	u64 queue_hi_statval_address;		/* In */
+	u8 queue_lo_size;			/* In */
+	u8 queue_hi_size;			/* In */
+	u16 queue_lo_threshold;			/* In */
+	u16 queue_hi_threshold;			/* In */
+	u16 int_on_empty;			/* In */
+} __packed;
 
 #define SEV_INIT_FLAGS_SEV_ES	0x01
 

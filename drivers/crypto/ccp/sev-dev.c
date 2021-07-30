@@ -59,6 +59,8 @@ static DEFINE_MUTEX(sev_cmd_mutex);
 static struct sev_misc_dev *misc_dev;
 
 static int psp_cmd_timeout = 100;
+static int sev_comm_mode = SEV_COMM_MAILBOX_ON;
+
 module_param(psp_cmd_timeout, int, 0644);
 MODULE_PARM_DESC(psp_cmd_timeout, " default timeout value, in seconds, for PSP commands");
 
@@ -209,6 +211,7 @@ static int sev_cmd_buffer_len(int cmd)
 	case SEV_CMD_GET_ID:			return sizeof(struct sev_data_get_id);
 	case SEV_CMD_ATTESTATION_REPORT:	return sizeof(struct sev_data_attestation_report);
 	case SEV_CMD_SEND_CANCEL:		return sizeof(struct sev_data_send_cancel);
+	case SEV_CMD_RING_BUFFER:		return sizeof(struct sev_data_ring_buffer);
 	case SEV_CMD_SNP_GCTX_CREATE:		return sizeof(struct sev_data_snp_addr);
 	case SEV_CMD_SNP_LAUNCH_START:		return sizeof(struct sev_data_snp_launch_start);
 	case SEV_CMD_SNP_LAUNCH_UPDATE:		return sizeof(struct sev_data_snp_launch_update);
@@ -1048,6 +1051,42 @@ static inline int __sev_do_init_locked(int *psp_ret)
 		return __sev_init_locked(psp_ret);
 }
 
+static int __sev_ring_buffer_enter_locked(int *error)
+{
+	int ret;
+	struct sev_data_ring_buffer *data;
+	struct sev_ringbuffer_queue *low_queue;
+	struct sev_ringbuffer_queue *hi_queue;
+	struct sev_device *sev = psp_master->sev_data;
+
+	if (sev_comm_mode == SEV_COMM_RINGBUFFER_ON)
+		return -EEXIST;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	low_queue = &sev->ring_buffer[SEV_COMMAND_PRIORITY_LOW];
+	hi_queue = &sev->ring_buffer[SEV_COMMAND_PRIORITY_HIGH];
+
+	data->queue_lo_cmdptr_address = __psp_pa(low_queue->cmd_ptr.data_align);
+	data->queue_lo_statval_address = __psp_pa(low_queue->stat_val.data_align);
+	data->queue_hi_cmdptr_address = __psp_pa(hi_queue->cmd_ptr.data_align);
+	data->queue_hi_statval_address = __psp_pa(hi_queue->stat_val.data_align);
+	data->queue_lo_size = 1;
+	data->queue_hi_size = 1;
+	data->int_on_empty = 1;
+
+	ret = __sev_do_cmd_locked(SEV_CMD_RING_BUFFER, data, error);
+	if (!ret) {
+		iowrite32(0, sev->io_regs + sev->vdata->cmdbuff_addr_hi_reg);
+		sev_comm_mode = SEV_COMM_RINGBUFFER_ON;
+	}
+
+	kfree(data);
+	return ret;
+}
+
 static void snp_set_hsave_pa(void *arg)
 {
 	wrmsrl(MSR_VM_HSAVE_PA, 0);
@@ -1471,7 +1510,9 @@ static int __sev_platform_shutdown_locked(int *error)
 	if (ret)
 		return ret;
 
+	sev_comm_mode = SEV_COMM_MAILBOX_ON;
 	sev->state = SEV_STATE_UNINIT;
+	sev_ring_buffer_queue_free();
 	dev_dbg(sev->dev, "SEV firmware shutdown\n");
 
 	return ret;
