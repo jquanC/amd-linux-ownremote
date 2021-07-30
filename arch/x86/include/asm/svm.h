@@ -233,6 +233,9 @@ struct __attribute__ ((__packed__)) vmcb_control_area {
 #define SVM_NESTED_CTL_SEV_ENABLE	BIT(1)
 #define SVM_NESTED_CTL_SEV_ES_ENABLE	BIT(2)
 
+/* same to the ring buffer max num */
+#define SVM_RING_BUFFER_MAX 4094
+
 
 #define SVM_TSC_RATIO_RSVD	0xffffff0000000000ULL
 #define SVM_TSC_RATIO_MIN	0x0000000000000001ULL
@@ -627,6 +630,23 @@ struct vmcb {
 #define SVM_EXITINFO_REG_MASK 0x0F
 
 #define SVM_CR0_SELECTIVE_MASK (X86_CR0_TS | X86_CR0_MP)
+
+struct sev_ringbuf_info_item {
+	struct page **pages;
+	uintptr_t hdr_vaddr;
+	uintptr_t trans_vaddr;
+	uintptr_t data_vaddr;
+	uintptr_t trans_uaddr;
+	uintptr_t hdr_uaddr;
+	unsigned long trans_len;
+	unsigned long hdr_len;
+	unsigned long n;
+};
+
+struct sev_ringbuf_infos {
+	struct sev_ringbuf_info_item *item[SVM_RING_BUFFER_MAX];
+	int num;
+};
 
 /* GHCB Accessor functions */
 

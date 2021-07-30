@@ -702,6 +702,9 @@ enum sev_cmd_id {
 	KVM_SEV_SNP_LAUNCH_UPDATE,
 	KVM_SEV_SNP_LAUNCH_FINISH,
 
+	/* Hygon CSV batch command, modified value, originally introduced in hygon-devel-5.10-v1 kernel 0x18 */
+	KVM_SEV_COMMAND_BATCH = 0x1F,
+
 	KVM_SEV_NR_MAX,
 };
 
@@ -825,6 +828,17 @@ struct kvm_sev_receive_update_data {
 	__u64 trans_uaddr;
 	__u32 trans_len;
 	__u32 pad2;
+};
+
+struct kvm_sev_batch_list_node {
+	__u64 cmd_data_addr;
+	__u64 addr;
+	__u64 next_cmd_addr;
+};
+
+struct kvm_sev_command_batch {
+	__u32 command_id;
+	__u64 sev_batch_list_uaddr;
 };
 
 struct kvm_sev_snp_launch_start {

@@ -70,6 +70,7 @@ static u64 sev_supported_vmsa_features;
 static u8 sev_enc_bit;
 static DECLARE_RWSEM(sev_deactivate_lock);
 static DEFINE_MUTEX(sev_bitmap_lock);
+static DEFINE_MUTEX(sev_cmd_batch_mutex);
 unsigned int max_sev_asid;
 static unsigned int min_sev_asid;
 static unsigned long sev_me_mask;
@@ -421,6 +422,28 @@ static int sev_issue_cmd(struct kvm *kvm, int id, void *data, int *error)
 	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
 
 	return __sev_issue_cmd(sev->fd, id, data, error);
+}
+
+static int __sev_issue_ringbuf_cmds(int fd, int *psp_ret)
+{
+	struct fd f;
+	int ret;
+
+	f = fdget(fd);
+	if (!f.file)
+		return -EBADF;
+
+	ret = sev_issue_ringbuf_cmds_external_user(f.file, psp_ret);
+
+	fdput(f);
+	return ret;
+}
+
+static int sev_issue_ringbuf_cmds(struct kvm *kvm, int *psp_ret)
+{
+	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
+
+	return __sev_issue_ringbuf_cmds(sev->fd, psp_ret);
 }
 
 static int sev_launch_start(struct kvm *kvm, struct kvm_sev_cmd *argp)
@@ -1709,6 +1732,139 @@ static int sev_receive_finish(struct kvm *kvm, struct kvm_sev_cmd *argp)
 	return sev_issue_cmd(kvm, SEV_CMD_RECEIVE_FINISH, &data, &argp->error);
 }
 
+static int sev_ringbuf_infos_free(struct kvm *kvm,
+				  struct sev_ringbuf_infos *ringbuf_infos)
+{
+	int i;
+
+	for (i = 0; i < ringbuf_infos->num; i++) {
+		struct sev_ringbuf_info_item * item = ringbuf_infos->item[i];
+
+		if (item) {
+			if (item->data_vaddr)
+				kfree((void *)item->data_vaddr);
+
+			if (item->hdr_vaddr)
+				kfree((void *)item->hdr_vaddr);
+
+			if (item->pages)
+				sev_unpin_memory(kvm, item->pages, item->n);
+
+			kfree(item);
+		}
+	}
+
+	return 0;
+}
+
+typedef int (*sev_ringbuf_input_func)(struct kvm *kvm,
+				      int prio,
+				      uintptr_t data_ptr,
+				      struct sev_ringbuf_infos *ringbuf_infos);
+typedef int (*sev_ringbuf_output_func)(struct kvm *kvm,
+				       struct sev_ringbuf_infos *ringbuf_infos);
+
+static int get_cmd_handlers(__u32 cmd,
+			    sev_ringbuf_input_func *to_ringbuf_func,
+			    sev_ringbuf_output_func *to_user_func)
+{
+	int ret = 0;
+
+	/* copy commands to ring buffer */
+	switch (cmd) {
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
+
+static int sev_command_batch(struct kvm *kvm, struct kvm_sev_cmd *argp)
+{
+	int ret;
+	struct kvm_sev_command_batch params;
+	uintptr_t node_addr;
+	struct sev_ringbuf_infos *ringbuf_infos;
+	sev_ringbuf_input_func sev_cmd_to_ringbuf_func = NULL;
+	sev_ringbuf_output_func sev_copy_to_user_func = NULL;
+	int prio = SEV_COMMAND_PRIORITY_HIGH;
+
+	if (copy_from_user(&params, (void __user *)(uintptr_t)argp->data,
+					sizeof(struct kvm_sev_command_batch)))
+		return -EFAULT;
+
+	/* ring buffer init */
+	if (sev_ring_buffer_queue_init())
+		return -EINVAL;
+
+	if (get_cmd_handlers(params.command_id,
+			     &sev_cmd_to_ringbuf_func, &sev_copy_to_user_func)) {
+		ret = -EINVAL;
+		goto err_free_ring_buffer;
+	}
+
+	ringbuf_infos = kzalloc(sizeof(*ringbuf_infos), GFP_KERNEL);
+	if (!ringbuf_infos) {
+		ret = -ENOMEM;
+		goto err_free_ring_buffer;
+	}
+
+	node_addr = (uintptr_t)params.sev_batch_list_uaddr;
+	while (node_addr) {
+		struct kvm_sev_batch_list_node node;
+
+		if (copy_from_user(&node, (void __user *)node_addr,
+					sizeof(struct kvm_sev_batch_list_node))) {
+			ret = -EFAULT;
+			goto err_free_ring_buffer_infos_items;
+		}
+
+		if (ringbuf_infos->num > SVM_RING_BUFFER_MAX) {
+			pr_err("%s: ring num is too large:%d,cmd:0x%x\n",
+				__func__, ringbuf_infos->num, params.command_id);
+			ret = -EINVAL;
+			goto err_free_ring_buffer_infos_items;
+		}
+
+		if (sev_cmd_to_ringbuf_func(kvm, prio,
+					    (uintptr_t)node.cmd_data_addr,
+					    ringbuf_infos)) {
+			ret = -EFAULT;
+			goto err_free_ring_buffer_infos_items;
+		}
+		/* 1st half set to HIGH queue, 2nd half set to LOW queue */
+		if (ringbuf_infos->num == SVM_RING_BUFFER_MAX / 2)
+			prio = SEV_COMMAND_PRIORITY_LOW;
+
+		node_addr = node.next_cmd_addr;
+	}
+
+	/* ring buffer process */
+	ret = sev_issue_ringbuf_cmds(kvm, &argp->error);
+	if (ret)
+		goto err_free_ring_buffer_infos_items;
+
+	ret = check_stat_queue_status(&argp->error);
+	if (ret)
+		goto err_free_ring_buffer_infos_items;
+
+	if ((sev_copy_to_user_func != NULL) &&
+	    (0 != sev_copy_to_user_func(kvm, ringbuf_infos))) {
+		ret = -EFAULT;
+		goto err_free_ring_buffer_infos_items;
+	}
+
+err_free_ring_buffer_infos_items:
+	sev_ringbuf_infos_free(kvm, ringbuf_infos);
+	kfree(ringbuf_infos);
+
+err_free_ring_buffer:
+	sev_ring_buffer_queue_free();
+
+	return ret;
+}
+
 static bool is_cmd_allowed_from_mirror(u32 cmd_id)
 {
 	/*
@@ -2509,6 +2665,11 @@ int sev_mem_enc_ioctl(struct kvm *kvm, void __user *argp)
 		break;
 	case KVM_SEV_RECEIVE_FINISH:
 		r = sev_receive_finish(kvm, &sev_cmd);
+		break;
+	case KVM_SEV_COMMAND_BATCH:
+		mutex_lock(&sev_cmd_batch_mutex);
+		r = sev_command_batch(kvm, &sev_cmd);
+		mutex_unlock(&sev_cmd_batch_mutex);
 		break;
 	case KVM_SEV_SNP_LAUNCH_START:
 		r = snp_launch_start(kvm, &sev_cmd);
