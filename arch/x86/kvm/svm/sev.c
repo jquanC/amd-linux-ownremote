@@ -446,6 +446,94 @@ static int sev_issue_ringbuf_cmds(struct kvm *kvm, int *psp_ret)
 	return __sev_issue_ringbuf_cmds(sev->fd, psp_ret);
 }
 
+/*--1024--1023--1024--1023--*/
+#define TRANS_MEMPOOL_1ST_BLOCK_OFFSET		0
+#define TRANS_MEMPOOL_2ND_BLOCK_OFFSET		1024*4096
+#define TRANS_MEMPOOL_3RD_BLOCK_OFFSET		2047*4096
+#define TRANS_MEMPOOL_4TH_BLOCK_OFFSET		3071*4096
+#define TRANS_MEMPOOL_BLOCKS_MAX_OFFSET		4094*4096
+#define TRANS_MEMPOOL_BLOCK_NUM			4
+#define TRANS_MEMPOOL_BLOCK_SIZE		(4096*1024)
+
+static size_t g_mempool_offset = 0;
+void *g_trans_mempool[TRANS_MEMPOOL_BLOCK_NUM] = { 0, };
+
+static int alloc_trans_mempool(void)
+{
+	int index;
+
+	for (index = 0; index < TRANS_MEMPOOL_BLOCK_NUM; index++) {
+		WARN_ONCE(g_trans_mempool[index],
+			  "g_trans_mempool[%d] was tainted !\n", index);
+
+		g_trans_mempool[index] = (char *)kmalloc(TRANS_MEMPOOL_BLOCK_SIZE, GFP_KERNEL);
+		if (!g_trans_mempool[index])
+			goto free_trans_mempool;
+	}
+
+	g_mempool_offset = 0;
+	return 0;
+
+free_trans_mempool:
+	for (index = 0; index < TRANS_MEMPOOL_BLOCK_NUM; index++) {
+		if (g_trans_mempool[index]){
+			kfree(g_trans_mempool[index]);
+			g_trans_mempool[index] = NULL;
+		}
+	}
+	return -ENOMEM;
+}
+
+static void *get_trans_data_from_mempool(size_t size)
+{
+	void *trans = NULL;
+	char *trans_data = NULL;
+	int index;
+	size_t offset;
+
+	if (g_mempool_offset < TRANS_MEMPOOL_2ND_BLOCK_OFFSET) {
+		index = 0;
+		offset = g_mempool_offset - TRANS_MEMPOOL_1ST_BLOCK_OFFSET;
+	} else if (g_mempool_offset < TRANS_MEMPOOL_3RD_BLOCK_OFFSET) {
+		index = 1;
+		offset = g_mempool_offset - TRANS_MEMPOOL_2ND_BLOCK_OFFSET;
+	} else if (g_mempool_offset < TRANS_MEMPOOL_4TH_BLOCK_OFFSET) {
+		index = 2;
+		offset = g_mempool_offset - TRANS_MEMPOOL_3RD_BLOCK_OFFSET;
+	} else if (g_mempool_offset < TRANS_MEMPOOL_BLOCKS_MAX_OFFSET) {
+		index = 3;
+		offset = g_mempool_offset - TRANS_MEMPOOL_4TH_BLOCK_OFFSET;
+	} else {
+		pr_err("trans data malloc failed:%lu",g_mempool_offset);
+		return NULL;
+	}
+
+	trans_data = (char *)g_trans_mempool[index];
+	trans = &trans_data[offset];
+	g_mempool_offset += size;
+
+	return trans;
+}
+
+static void reset_mempool_offset(void)
+{
+	g_mempool_offset = 0;
+}
+
+static void free_trans_mempool(void)
+{
+	int i;
+
+	for (i = 0; i < TRANS_MEMPOOL_BLOCK_NUM; i++) {
+		if (g_trans_mempool[i]) {
+			kfree(g_trans_mempool[i]);
+			g_trans_mempool[i] = NULL;
+		}
+	}
+
+	g_mempool_offset = 0;
+}
+
 static int sev_launch_start(struct kvm *kvm, struct kvm_sev_cmd *argp)
 {
 	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
@@ -1857,6 +1945,7 @@ static int sev_command_batch(struct kvm *kvm, struct kvm_sev_cmd *argp)
 
 err_free_ring_buffer_infos_items:
 	sev_ringbuf_infos_free(kvm, ringbuf_infos);
+	reset_mempool_offset();
 	kfree(ringbuf_infos);
 
 err_free_ring_buffer:
@@ -3024,6 +3113,9 @@ void __init sev_hardware_setup(void)
 		sev_asid_bitmap = NULL;
 		goto out;
 	}
+		
+	if (alloc_trans_mempool())
+		goto out;
 
 	if (min_sev_asid <= max_sev_asid) {
 		sev_asid_count = max_sev_asid - min_sev_asid + 1;
@@ -3092,6 +3184,7 @@ void sev_hardware_unsetup(void)
 		return;
 
 	/* No need to take sev_bitmap_lock, all VMs have been destroyed. */
+	free_trans_mempool();
 	sev_flush_asids(1, max_sev_asid);
 
 	bitmap_free(sev_asid_bitmap);
