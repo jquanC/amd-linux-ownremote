@@ -1852,6 +1852,131 @@ typedef int (*sev_ringbuf_input_func)(struct kvm *kvm,
 typedef int (*sev_ringbuf_output_func)(struct kvm *kvm,
 				       struct sev_ringbuf_infos *ringbuf_infos);
 
+static int sev_send_update_data_to_ringbuf(struct kvm *kvm,
+					   int prio,
+					   uintptr_t data_ptr,
+					   struct sev_ringbuf_infos *ringbuf_infos)
+{
+	struct kvm_sev_info *sev = &to_kvm_svm(kvm)->sev_info;
+	struct sev_data_send_update_data *data;
+	struct sev_ringbuf_info_item *item;
+	struct kvm_sev_send_update_data params;
+	void *hdr, *trans_data;
+	struct page **guest_page;
+	unsigned long n;
+	int ret, offset;
+
+	if (copy_from_user(&params, (void __user *)data_ptr,
+				sizeof(struct kvm_sev_send_update_data)))
+		return -EFAULT;
+
+	/* userspace shouldn't query either header or trans length in ringbuf mode */
+	if (!params.trans_len || !params.hdr_len)
+		return -EINVAL;
+
+	if (!params.trans_uaddr || !params.guest_uaddr ||
+	    !params.guest_len || !params.hdr_uaddr)
+		return -EINVAL;
+
+	/* Check if we are crossing the page boundary */
+	offset = params.guest_uaddr & (PAGE_SIZE - 1);
+	if ((params.guest_len + offset > PAGE_SIZE))
+		return -EINVAL;
+
+	/* Pin guest memory */
+	guest_page = sev_pin_memory(kvm, params.guest_uaddr & PAGE_MASK,
+				    PAGE_SIZE, &n, 0);
+	if (IS_ERR(guest_page))
+		return PTR_ERR(guest_page);
+
+	/* allocate memory for header and transport buffer */
+	ret = -ENOMEM;
+	hdr = kmalloc(params.hdr_len, GFP_KERNEL);
+	if (!hdr)
+		goto e_unpin;
+
+	trans_data = get_trans_data_from_mempool(params.trans_len);
+	if (!trans_data)
+		goto e_free_hdr;
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		goto e_free_hdr;
+
+	data->hdr_address = __psp_pa(hdr);
+	data->hdr_len = params.hdr_len;
+	data->trans_address = __psp_pa(trans_data);
+	data->trans_len = params.trans_len;
+
+	/* The SEND_UPDATE_DATA command requires C-bit to be always set. */
+	data->guest_address = (page_to_pfn(guest_page[0]) << PAGE_SHIFT) +
+				offset;
+	data->guest_address |= sev_me_mask;
+	data->guest_len = params.guest_len;
+	data->handle = sev->handle;
+
+	ret = fill_cmd_queue(prio, SEV_CMD_SEND_UPDATE_DATA, data, 0);
+	if (ret)
+		goto e_free;
+
+	/* Create item to save page info and pointer, whitch will be freed in function
+	sev_command_batch beacuse it will be used after PSP return for copy_to_user */
+	item = kzalloc(sizeof(*item), GFP_KERNEL);
+	if (!item) {
+		ret = -ENOMEM;
+		goto e_free;
+	}
+	item->pages = guest_page;
+	item->n = n;
+	item->hdr_vaddr = (uintptr_t)hdr;
+	item->trans_vaddr = (uintptr_t)trans_data;
+	item->data_vaddr = (uintptr_t)data;
+	item->hdr_uaddr = params.hdr_uaddr;
+	item->trans_uaddr = params.trans_uaddr;
+	item->hdr_len = params.hdr_len;
+	item->trans_len = params.trans_len;
+	ringbuf_infos->item[ringbuf_infos->num] = item;
+	ringbuf_infos->num++;
+
+	/* copy to ring buffer success, data freed after CMDs handled */
+	goto finish;
+
+e_free:
+	kfree(data);
+e_free_hdr:
+	kfree(hdr);
+e_unpin:
+	sev_unpin_memory(kvm, guest_page, n);
+
+finish:
+	return ret;
+}
+
+static int sev_send_update_data_copy_to_user(struct kvm *kvm,
+					     struct sev_ringbuf_infos *ringbuf_infos)
+{
+	int i, ret = 0;
+
+	for (i = 0; i < ringbuf_infos->num; i++) {
+		struct sev_ringbuf_info_item * item = ringbuf_infos->item[i];
+
+		/* copy transport buffer to user space */
+		if (copy_to_user((void __user *)item->trans_uaddr,
+				(void *)item->trans_vaddr, item->trans_len)) {
+			ret = -EFAULT;
+			break;
+		}
+		/* Copy packet header to userspace. */
+		if (copy_to_user((void __user *)item->hdr_uaddr,
+				 (void *)item->hdr_vaddr, item->hdr_len)) {
+			ret = -EFAULT;
+			break;
+		}
+	}
+
+	return ret;
+}
+
 static int get_cmd_handlers(__u32 cmd,
 			    sev_ringbuf_input_func *to_ringbuf_func,
 			    sev_ringbuf_output_func *to_user_func)
@@ -1860,6 +1985,10 @@ static int get_cmd_handlers(__u32 cmd,
 
 	/* copy commands to ring buffer */
 	switch (cmd) {
+	case KVM_SEV_SEND_UPDATE_DATA:
+		*to_ringbuf_func = sev_send_update_data_to_ringbuf;
+		*to_user_func = sev_send_update_data_copy_to_user;
+		break;
 	default:
 		ret = -EINVAL;
 		break;
