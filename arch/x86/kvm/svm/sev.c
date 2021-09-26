@@ -3019,6 +3019,15 @@ out:
 	return r;
 }
 
+void svm_flush_log_dirty(struct kvm *kvm)
+{
+	/* Lets make sure caches are flushed to ensure
+	 * that guest data has been written into the memory.
+	 */
+	if (sev_guest(kvm))
+		wbinvd_on_all_cpus();
+}
+
 int sev_mem_enc_register_region(struct kvm *kvm,
 				struct kvm_enc_region *range)
 {
