@@ -957,7 +957,8 @@ static void __init kvm_init_platform(void)
 			if (entry->type != E820_TYPE_RAM)
 				continue;
 
-			nr_pages = DIV_ROUND_UP(entry->size, PAGE_SIZE);
+			nr_pages = (PAGE_ALIGN(entry->addr + entry->size)
+					- (entry->addr & PAGE_MASK)) >> PAGE_SHIFT;
 
 			kvm_sev_hypercall3(KVM_HC_MAP_GPA_RANGE, entry->addr,
 				       nr_pages,
