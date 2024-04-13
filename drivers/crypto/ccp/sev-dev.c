@@ -1172,6 +1172,7 @@ static int sev_do_ringbuf_cmds(int *psp_ret)
 {
 	struct psp_device *psp = psp_master;
 	struct sev_device *sev;
+	struct sev_user_data_status status;
 	int rc;
 
 	if (!psp || !psp->sev_data)
@@ -1187,7 +1188,7 @@ static int sev_do_ringbuf_cmds(int *psp_ret)
 	rc = __sev_do_ringbuf_cmds_locked(psp_ret);
 
 	/* exit ringbuf mode by send CMD in mailbox mode */
-	__sev_do_cmd_locked(SEV_CMD_PLATFORM_STATUS, &sev->status_cmd_buf, NULL);
+	__sev_do_cmd_locked(SEV_CMD_PLATFORM_STATUS, &status, NULL);
 	sev_comm_mode = SEV_COMM_MAILBOX_ON;
 
 cmd_unlock:
